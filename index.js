@@ -1,16 +1,32 @@
 // ============================================================
 // 不動産 初期対応 LINE Bot（Node.js / Render.com版）
+// Google スプレッドシート連携あり
 // ============================================================
 
 const express = require('express');
-const crypto = require('crypto');
+const { google } = require('googleapis');
 const app = express();
 
-// ── 環境変数から設定を読み込み（Render.comの管理画面で設定）──
+// ── 環境変数から設定を読み込み ──
 const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
 const LINE_CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || '';
 const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || '';
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '';
 const PORT = process.env.PORT || 3000;
+
+// ── Google Sheets API 認証セットアップ ──
+let sheets = null;
+try {
+  const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}');
+  const auth = new google.auth.GoogleAuth({
+    credentials: serviceAccount,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  });
+  sheets = google.sheets({ version: 'v4', auth });
+  console.log('Google Sheets API: 認証成功');
+} catch (err) {
+  console.error('Google Sheets API: 認証失敗', err.message);
+}
 
 // ── JSONボディを受け取る設定 ──
 app.use(express.json({
@@ -18,8 +34,6 @@ app.use(express.json({
 }));
 
 // ── ユーザーの会話ステート管理（メモリ内） ──
-// ※ Render無料プランでは再起動でリセットされますが、
-//    ヒアリングは数分で完了するので実用上問題ありません
 const userStates = {};
 
 function getUserState(userId) {
@@ -35,7 +49,71 @@ function clearUserState(userId) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// ヘルスチェック（Render.comの死活監視用）
+// スプレッドシートへの書き込み
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async function writeToSheet(data) {
+  if (!sheets || !SPREADSHEET_ID) {
+    console.log('スプレッドシート未設定のためスキップ');
+    return;
+  }
+
+  try {
+    const spreadsheet = await sheets.spreadsheets.get({
+      spreadsheetId: SPREADSHEET_ID
+    });
+
+    const sheetNames = spreadsheet.data.sheets.map(s => s.properties.title);
+    const SHEET_NAME = '顧客ヒアリング';
+
+    if (!sheetNames.includes(SHEET_NAME)) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SPREADSHEET_ID,
+        requestBody: {
+          requests: [{
+            addSheet: { properties: { title: SHEET_NAME } }
+          }]
+        }
+      });
+
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME}!A1`,
+        valueInputOption: 'RAW',
+        requestBody: {
+          values: [['受付日時', 'LINE User ID', 'お名前', '目的', 'エリア', '予算', '間取り', '希望利回り', '検討時期', '自由入力', 'ステータス']]
+        }
+      });
+    }
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A1`,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [[
+          data.timestamp,
+          data.userId,
+          data.name,
+          data.purpose,
+          data.area,
+          data.budget,
+          data.layout,
+          data.yield,
+          data.timing,
+          data.freeText,
+          data.status
+        ]]
+      }
+    });
+
+    console.log('スプレッドシートに記録完了');
+  } catch (err) {
+    console.error('スプレッドシート書き込みエラー:', err.message);
+  }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ヘルスチェック
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 app.get('/', (req, res) => {
   res.status(200).send('LINE Bot is running.');
@@ -45,7 +123,6 @@ app.get('/', (req, res) => {
 // Webhook エントリーポイント
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 app.post('/webhook', async (req, res) => {
-  // まず200を返す（LINEのタイムアウト防止）
   res.status(200).json({ status: 'ok' });
 
   const events = req.body.events || [];
@@ -104,7 +181,6 @@ async function handlePostback(event) {
   const state = getUserState(userId);
   const params = parsePostbackData(data);
 
-  // ── 目的の選択 ──
   if (params.purpose) {
     state.answers.purpose = params.purpose;
 
@@ -128,46 +204,24 @@ async function handlePostback(event) {
     return;
   }
 
-  // ── 予算選択（賃貸） ──
   if (params.budget_rent) {
     state.answers.budget = params.budget_rent;
     await proceedAfterBudget(event, userId, state);
     return;
   }
 
-  // ── 予算選択（売買） ──
   if (params.budget_buy) {
     state.answers.budget = params.budget_buy;
     await proceedAfterBudget(event, userId, state);
     return;
   }
 
-  // ── 予算選択（投資） ──
   if (params.budget_invest) {
     state.answers.budget = params.budget_invest;
-    state.step = 'ASK_YIELD';
-    setUserState(userId, state);
-    await replyMessage(event.replyToken, [
-      {
-        type: 'template',
-        altText: '希望利回りを選んでください',
-        template: {
-          type: 'buttons',
-          title: '希望利回り',
-          text: 'ご希望の表面利回りは？',
-          actions: [
-            { type: 'postback', label: '4%以上', data: 'yield=4%以上' },
-            { type: 'postback', label: '6%以上', data: 'yield=6%以上' },
-            { type: 'postback', label: '8%以上', data: 'yield=8%以上' },
-            { type: 'postback', label: 'こだわらない', data: 'yield=こだわらない' }
-          ]
-        }
-      }
-    ]);
+    await proceedAfterBudget(event, userId, state);
     return;
   }
 
-  // ── 利回り選択（投資） ──
   if (params.yield) {
     state.answers.yield = params.yield;
     state.step = 'ASK_LAYOUT';
@@ -176,7 +230,6 @@ async function handlePostback(event) {
     return;
   }
 
-  // ── 間取り選択 ──
   if (params.layout) {
     state.answers.layout = params.layout;
     state.step = 'ASK_TIMING';
@@ -201,7 +254,6 @@ async function handlePostback(event) {
     return;
   }
 
-  // ── 時期選択 ──
   if (params.timing) {
     state.answers.timing = params.timing;
     state.step = 'ASK_NAME';
@@ -398,7 +450,6 @@ async function completeHearing(event, userId, state) {
   const now = new Date();
   const timestamp = now.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
 
-  // ── コンソールに記録（Render.comのLogsで確認可能） ──
   const record = {
     timestamp,
     userId,
@@ -412,14 +463,12 @@ async function completeHearing(event, userId, state) {
     freeText: a.freeText || '',
     status: '未対応'
   };
+
+  await writeToSheet(record);
+
   console.log('=== 新規お問い合わせ ===');
   console.log(JSON.stringify(record, null, 2));
 
-  // ── 担当者にメール通知（LINE Notify経由 or 外部メールサービス） ──
-  // ※ 簡易版として、LINE Notifyで通知する仕組みを後から追加可能
-  // ※ ここではコンソールログとLINEへの完了メッセージのみ
-
-  // ── お客さまへ完了メッセージ ──
   await replyMessage(event.replyToken, [
     {
       type: 'text',
