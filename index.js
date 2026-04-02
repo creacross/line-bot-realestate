@@ -1,6 +1,6 @@
 // ============================================================
 // 不動産 初期対応 LINE Bot（Node.js / Render.com版）
-// Google スプレッドシート連携あり
+// Google スプレッドシート連携 + 手動/Bot切り替え機能
 // ============================================================
 
 const express = require('express');
@@ -37,7 +37,7 @@ app.use(express.json({
 const userStates = {};
 
 function getUserState(userId) {
-  return userStates[userId] || { step: 'NONE', answers: {} };
+  return userStates[userId] || { step: 'NONE', answers: {}, mode: 'bot' };
 }
 
 function setUserState(userId, state) {
@@ -45,7 +45,35 @@ function setUserState(userId, state) {
 }
 
 function clearUserState(userId) {
-  delete userStates[userId];
+  // モードは保持したまま、ヒアリングデータだけクリア
+  const currentState = userStates[userId];
+  if (currentState) {
+    userStates[userId] = { step: 'NONE', answers: {}, mode: currentState.mode || 'bot' };
+  } else {
+    delete userStates[userId];
+  }
+}
+
+// ── モード切り替え ──
+function setManualMode(userId) {
+  const state = getUserState(userId);
+  state.mode = 'manual';
+  state.step = 'NONE';
+  state.answers = {};
+  setUserState(userId, state);
+}
+
+function setBotMode(userId) {
+  const state = getUserState(userId);
+  state.mode = 'bot';
+  state.step = 'NONE';
+  state.answers = {};
+  setUserState(userId, state);
+}
+
+function isManualMode(userId) {
+  const state = getUserState(userId);
+  return state.mode === 'manual';
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -129,13 +157,105 @@ app.post('/webhook', async (req, res) => {
 
   for (const event of events) {
     try {
+      // ── 友だち追加 ──
       if (event.type === 'follow') {
         await handleFollow(event);
-      } else if (event.type === 'message' && event.message.type === 'text') {
-        await handleMessage(event);
-      } else if (event.type === 'postback') {
-        await handlePostback(event);
+        continue;
       }
+
+      // ユーザーIDを取得
+      const userId = event.source ? event.source.userId : null;
+      if (!userId) continue;
+
+      // ── テキストメッセージの場合、担当者コマンドを最優先でチェック ──
+      if (event.type === 'message' && event.message.type === 'text') {
+        const text = event.message.text.trim();
+
+        // 担当者コマンド：手動モードに切り替え
+        if (text === '#対応開始') {
+          setManualMode(userId);
+          await replyMessage(event.replyToken, [
+            {
+              type: 'text',
+              text: '担当スタッフが対応いたします。\nどうぞお気軽にご質問ください。'
+            }
+          ]);
+          console.log(`[モード切替] ${userId} → 手動対応`);
+          continue;
+        }
+
+        // 担当者コマンド：Bot対応に戻す
+        if (text === '#bot再開') {
+          setBotMode(userId);
+          await replyMessage(event.replyToken, [
+            {
+              type: 'text',
+              text: 'AIアシスタントが対応を再開しました。\nご質問があればお気軽にどうぞ！\n\n新しいご相談は「相談したい」と\n送ってください。'
+            }
+          ]);
+          console.log(`[モード切替] ${userId} → Bot対応`);
+          continue;
+        }
+
+        // 担当者コマンド：現在のモード確認
+        if (text === '#状態確認') {
+          const state = getUserState(userId);
+          await replyMessage(event.replyToken, [
+            {
+              type: 'text',
+              text: `📊 現在の状態\nモード：${state.mode === 'manual' ? '手動対応中' : 'Bot対応中'}\nステップ：${state.step}`
+            }
+          ]);
+          continue;
+        }
+
+        // お客さまが「相談したい」→ 手動モードでもBot対応に戻す
+        if (text === '相談したい' || text === '相談') {
+          setBotMode(userId);
+          setUserState(userId, { step: 'SELECT_PURPOSE', answers: {}, mode: 'bot' });
+          await replyMessage(event.replyToken, [
+            {
+              type: 'template',
+              altText: 'ご相談の目的を選んでください',
+              template: {
+                type: 'buttons',
+                title: 'ご相談の目的',
+                text: '当てはまるものをお選びください',
+                actions: [
+                  { type: 'postback', label: '🏠 賃貸で探したい', data: 'purpose=賃貸' },
+                  { type: 'postback', label: '🏡 購入を検討したい', data: 'purpose=売買' },
+                  { type: 'postback', label: '📈 投資物件を探したい', data: 'purpose=投資' },
+                  { type: 'postback', label: '📋 その他のご相談', data: 'purpose=その他' }
+                ]
+              }
+            }
+          ]);
+          console.log(`[モード切替] ${userId} → Bot対応（相談したい）`);
+          continue;
+        }
+
+        // ── 手動モード中はBotは何もしない ──
+        if (isManualMode(userId)) {
+          console.log(`[手動モード] ${userId} のメッセージをスキップ: ${text}`);
+          continue;
+        }
+
+        // ── Bot対応中：通常のメッセージ処理 ──
+        await handleMessage(event);
+        continue;
+      }
+
+      // ── Postbackの場合 ──
+      if (event.type === 'postback') {
+        // 手動モード中はPostbackも無視
+        if (isManualMode(userId)) {
+          console.log(`[手動モード] ${userId} のPostbackをスキップ`);
+          continue;
+        }
+        await handlePostback(event);
+        continue;
+      }
+
     } catch (err) {
       console.error('Error handling event:', err);
     }
@@ -147,7 +267,7 @@ app.post('/webhook', async (req, res) => {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function handleFollow(event) {
   const userId = event.source.userId;
-  setUserState(userId, { step: 'SELECT_PURPOSE', answers: {} });
+  setUserState(userId, { step: 'SELECT_PURPOSE', answers: {}, mode: 'bot' });
 
   await replyMessage(event.replyToken, [
     {
@@ -302,33 +422,13 @@ async function handleMessage(event) {
       break;
 
     default:
-      if (text === '相談したい' || text === '相談') {
-        setUserState(userId, { step: 'SELECT_PURPOSE', answers: {} });
-        await replyMessage(event.replyToken, [
-          {
-            type: 'template',
-            altText: 'ご相談の目的を選んでください',
-            template: {
-              type: 'buttons',
-              title: 'ご相談の目的',
-              text: '当てはまるものをお選びください',
-              actions: [
-                { type: 'postback', label: '🏠 賃貸で探したい', data: 'purpose=賃貸' },
-                { type: 'postback', label: '🏡 購入を検討したい', data: 'purpose=売買' },
-                { type: 'postback', label: '📈 投資物件を探したい', data: 'purpose=投資' },
-                { type: 'postback', label: '📋 その他のご相談', data: 'purpose=その他' }
-              ]
-            }
-          }
-        ]);
-      } else {
-        await replyMessage(event.replyToken, [
-          {
-            type: 'text',
-            text: 'ご連絡ありがとうございます！\n「相談したい」と送っていただければ、\n最初からご案内をスタートします。'
-          }
-        ]);
-      }
+      // ヒアリング外のメッセージ
+      await replyMessage(event.replyToken, [
+        {
+          type: 'text',
+          text: 'ご連絡ありがとうございます！\n「相談したい」と送っていただければ、\n最初からご案内をスタートします。'
+        }
+      ]);
       break;
   }
 }
@@ -469,6 +569,7 @@ async function completeHearing(event, userId, state) {
   console.log('=== 新規お問い合わせ ===');
   console.log(JSON.stringify(record, null, 2));
 
+  // ── お客さまへ完了メッセージ ──
   await replyMessage(event.replyToken, [
     {
       type: 'text',
@@ -486,7 +587,9 @@ async function completeHearing(event, userId, state) {
     }
   ]);
 
-  clearUserState(userId);
+  // ── ヒアリング完了後は自動で手動モードに切り替え ──
+  setManualMode(userId);
+  console.log(`[自動切替] ${userId} → 手動対応モード（ヒアリング完了）`);
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -533,4 +636,10 @@ function parsePostbackData(dataStr) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 app.listen(PORT, () => {
   console.log(`LINE Bot server running on port ${PORT}`);
+  console.log('');
+  console.log('=== 担当者コマンド一覧 ===');
+  console.log('#対応開始  → 手動対応モードに切り替え');
+  console.log('#bot再開   → Bot対応モードに戻す');
+  console.log('#状態確認  → 現在のモードを確認');
+  console.log('========================');
 });
