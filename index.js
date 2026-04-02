@@ -58,6 +58,7 @@ function clearUserState(userId) {
 function setManualMode(userId) {
   const state = getUserState(userId);
   state.mode = 'manual';
+  state.manualGreeted = false; // 手動モード切替後の初回メッセージフラグ
   state.step = 'NONE';
   state.answers = {};
   setUserState(userId, state);
@@ -234,9 +235,23 @@ app.post('/webhook', async (req, res) => {
           continue;
         }
 
-        // ── 手動モード中はBotは何もしない ──
+        // ── 手動モード中の処理 ──
         if (isManualMode(userId)) {
-          console.log(`[手動モード] ${userId} のメッセージをスキップ: ${text}`);
+          const state = getUserState(userId);
+          // 初回メッセージのみ自動返信
+          if (!state.manualGreeted) {
+            state.manualGreeted = true;
+            setUserState(userId, state);
+            await replyMessage(event.replyToken, [
+              {
+                type: 'text',
+                text: '担当スタッフが対応いたします。\n他にも聞きたいことがあれば\nお気軽にご質問ください。'
+              }
+            ]);
+            console.log(`[手動モード] ${userId} 初回自動返信を送信`);
+          } else {
+            console.log(`[手動モード] ${userId} のメッセージをスキップ: ${text}`);
+          }
           continue;
         }
 
