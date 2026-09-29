@@ -33,8 +33,12 @@ const PORT = process.env.PORT || 3000;
 
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
-const IGNORE_KEYWORDS = (process.env.IGNORE_KEYWORDS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
+// 全角/半角の違いを吸収して比較する（「１」と「1」、「，」と「,」などを同一視）
+const normalize = s => (s || '').normalize('NFKC').trim();
+const IGNORE_KEYWORDS = [...new Set(
+  normalize(process.env.IGNORE_KEYWORDS)
+    .split(/[,、\n]/).map(s => s.trim()).filter(Boolean)
+)];
 
 const HEARING_SHEET = '顧客ヒアリング';
 const STATE_SHEET = 'モード管理';
@@ -300,7 +304,7 @@ app.post('/webhook', async (req, res) => {
         }
 
         // ③ 応答メッセージ（キーワード応答）用のキーワードはBotが反応しない
-        if (IGNORE_KEYWORDS.includes(text)) {
+        if (IGNORE_KEYWORDS.includes(normalize(text))) {
           console.log(`[除外キーワード] ${userId}: ${text}`);
           continue;
         }
