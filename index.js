@@ -10,7 +10,7 @@
 //  3. スタッフコマンドは「管理者のLINEから、対象お客さまのIDを指定」する方式に変更
 //     （旧仕様では送信したスタッフ自身のモードが切り替わっていた）
 //  4. 応答メッセージ（キーワード応答）用のキーワードにはBotが反応しない
-//  5. ヒアリング外のメッセージで「相談したい」案内を繰り返さない
+//  5. ヒアリング外のメッセージにはBotは返信せず、手動対応へ引き継ぐ
 //  6. Webhook の署名検証を追加（なりすまし防止）
 //
 // 【Render.com に追加する環境変数】
@@ -309,22 +309,9 @@ app.post('/webhook', async (req, res) => {
           continue;
         }
 
-        // ④ 手動モード中：「相談したい」を含め、初回案内以外は一切返信しない
+        // ④ 手動モード中：何を送られても一切返信しない（「相談したい」も含む）
         if (isManualMode(userId)) {
-          const state = getUserState(userId);
-          if (!state.manualGreeted) {
-            state.manualGreeted = true;
-            setUserState(userId, state);
-            await replyMessage(event.replyToken, [
-              {
-                type: 'text',
-                text: '担当スタッフが対応いたします。\n他にも聞きたいことがあれば\nお気軽にご質問ください。'
-              }
-            ]);
-            console.log(`[手動モード] ${userId} 初回自動返信を送信`);
-          } else {
-            console.log(`[手動モード] ${userId} のメッセージをスキップ: ${text}`);
-          }
+          console.log(`[手動モード] ${userId} のメッセージをスキップ: ${text}`);
           continue;
         }
 
@@ -560,16 +547,11 @@ async function handleMessage(event) {
       break;
 
     default:
-      // ヒアリング外の自由メッセージ → 1回だけ案内して手動対応へ引き継ぐ
-      // （旧仕様では「相談したい」案内を毎回返していた）
+      // ヒアリング外の自由メッセージ（リッチメニューの「★まずはご相談★」等を含む）
+      // → Botは返信せず、黙って手動対応へ引き継ぐ
+      //   （返信はLINE公式の応答メッセージ／スタッフに任せ、二重返信を防ぐ）
       setManualMode(userId, { greeted: true });
-      await replyMessage(event.replyToken, [
-        {
-          type: 'text',
-          text: 'ご連絡ありがとうございます！\n内容を確認のうえ、担当スタッフよりご返信いたします。\n少々お待ちくださいませ。'
-        }
-      ]);
-      console.log(`[自動切替] ${userId} → 手動対応（ヒアリング外メッセージ）`);
+      console.log(`[自動切替] ${userId} → 手動対応（ヒアリング外メッセージ・返信なし）: ${text}`);
       break;
   }
 }
