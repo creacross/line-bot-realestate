@@ -12,6 +12,7 @@
 //  4. 応答メッセージ（キーワード応答）用のキーワードにはBotが反応しない
 //  5. ヒアリング外のメッセージにはBotは返信せず、手動対応へ引き継ぐ
 //  6. Webhook の署名検証を追加（なりすまし防止）
+//  7. ヒアリング完了時に ADMIN_USER_IDS のスタッフへ新着通知（プッシュ）を送信
 //
 // 【Render.com に追加する環境変数】
 //  ADMIN_USER_IDS   : スタッフのLINE User ID（複数はカンマ区切り）
@@ -681,6 +682,9 @@ async function completeHearing(event, userId, state) {
   console.log('=== 新規お問い合わせ ===');
   console.log(JSON.stringify(record, null, 2));
 
+  // スタッフへ新着通知（失敗してもお客さまへの返信は止めない）
+  await notifyStaff(record);
+
   await replyMessage(event.replyToken, [
     {
       type: 'text',
@@ -725,6 +729,65 @@ async function replyMessage(replyToken, messages) {
   } catch (err) {
     console.error('Reply failed:', err);
   }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// LINE Messaging API へプッシュ送信（スタッフ通知用）
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async function pushMessage(to, messages) {
+  try {
+    const response = await fetch('https://api.line.me/v2/bot/message/push', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`
+      },
+      body: JSON.stringify({ to, messages })
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error(`LINE Push Error（${to}）:`, response.status, errorBody);
+    }
+  } catch (err) {
+    console.error(`Push failed（${to}）:`, err);
+  }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 新規お問い合わせをスタッフ（ADMIN_USER_IDS）へ通知
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const URGENT_TIMINGS = ['すぐにでも', '1〜3ヶ月以内'];
+
+function buildStaffNotice(record) {
+  const urgent = URGENT_TIMINGS.includes(record.timing);
+  const lines = [
+    urgent ? '🔥 新規お問い合わせ（検討時期が近い方です）' : '🔔 新規お問い合わせ',
+    '',
+    `お名前：${record.name || '−'}`,
+    `目的：${record.purpose || '−'}`
+  ];
+  if (record.area) lines.push(`エリア：${record.area}`);
+  if (record.budget) lines.push(`予算：${record.budget}`);
+  if (record.yield) lines.push(`希望利回り：${record.yield}`);
+  if (record.layout) lines.push(`間取り：${record.layout}`);
+  if (record.timing) lines.push(`検討時期：${record.timing}`);
+  if (record.freeText) lines.push(`ご相談内容：${record.freeText}`);
+  lines.push('', `受付：${record.timestamp}`, '詳細はスプレッドシート「顧客ヒアリング」をご確認ください。');
+  return [
+    { type: 'text', text: lines.join('\n') },
+    // IDだけの別メッセージにして、長押しでそのままコピーできるようにする
+    { type: 'text', text: `お客さまID（#対応開始 などのコマンド用）\n${record.userId}` }
+  ];
+}
+
+async function notifyStaff(record) {
+  if (ADMIN_USER_IDS.length === 0) {
+    console.warn('ADMIN_USER_IDS 未設定のためスタッフ通知をスキップ');
+    return;
+  }
+  const messages = buildStaffNotice(record);
+  await Promise.all(ADMIN_USER_IDS.map(id => pushMessage(id, messages)));
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
