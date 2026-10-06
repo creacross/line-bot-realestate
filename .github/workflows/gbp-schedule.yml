@@ -1,0 +1,18 @@
+name: GBP投稿案の作成（火・金 朝9時）
+
+on:
+  schedule:
+    - cron: '0 0 * * 2,5' # UTC 0:00 = 日本時間 9:00（火・金）
+  workflow_dispatch: {}   # 手動実行も可
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ボットに投稿案の作成を依頼（LINEに承認依頼が届く）
+        run: |
+          # Render の無料プランはスリープから復帰に時間がかかるため、長めに待って再試行する
+          curl -fsS --max-time 180 --retry 3 --retry-delay 20 --retry-all-errors \
+            -X POST \
+            -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.BOT_URL }}/cron/gbp-draft"

@@ -24,6 +24,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const { google } = require('googleapis');
+const { createGbp } = require('./gbp');
 const app = express();
 
 // ── 環境変数から設定を読み込み ──
@@ -298,6 +299,9 @@ app.post('/webhook', async (req, res) => {
           continue;
         }
 
+        // ①-2 Google投稿案をいま作る（管理者のみ）
+        if (await gbp.handleCommand(event, userId, text)) continue;
+
         // ② スタッフコマンド（管理者のみ有効）
         if (text.startsWith('#')) {
           const handled = await handleStaffCommand(event, userId, text);
@@ -331,6 +335,8 @@ app.post('/webhook', async (req, res) => {
 
       // ── Postback ──
       if (event.type === 'postback') {
+        // Google投稿の承認ボタン（手動モードの影響を受けない）
+        if (await gbp.handlePostback(event)) continue;
         if (isManualMode(userId)) {
           console.log(`[手動モード] ${userId} のPostbackをスキップ`);
           continue;
@@ -803,6 +809,13 @@ function parsePostbackData(dataStr) {
   });
   return result;
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Google ビジネスプロフィール投稿（gbp.js）
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const gbp = createGbp({
+  app, sheets, spreadsheetId: SPREADSHEET_ID, adminUserIds: ADMIN_USER_IDS, pushMessage, replyMessage
+});
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // サーバー起動（状態を読み込んでから受付開始）
