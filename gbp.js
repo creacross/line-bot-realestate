@@ -16,18 +16,24 @@
 //   GBP_CLIENT_ID / GBP_CLIENT_SECRET / GBP_REFRESH_TOKEN : Google OAuth
 //   GBP_ACCOUNT_ID / GBP_LOCATION_ID : 投稿先（数字のID）
 //   GBP_DEFAULT_URL     : ボタンの遷移先（既定 https://creacross.jp/）
+//   GBP_AUTO_IMAGE      : off にすると、タイトル入りカード画像の自動作成をやめる
+//   PUBLIC_BASE_URL     : 任意（画像URLの土台。未設定なら Render の RENDER_EXTERNAL_URL）
 //   ※ GBP_* が未設定の間は「テスト動作」になり、Googleには投稿しません
+//
+// 画像：シートの「画像URL」列に https:// のURLがあればそれを使い、
+//       空欄ならタイトル入りのカード画像を自動で作って添付する（gbp-image.js）
 // ============================================================
 
 const crypto = require('crypto');
 const { google } = require('googleapis');
+const { verifyImage, buildImageUrl, imageEnabled, renderCard, ALLOWED_WIDTHS } = require('./gbp-image');
 
 const GBP_SHEET = 'GBP投稿';
 const HEADERS = [
   'ID', 'タイトル', '元文章（マイベストプロ等）', '参考URL', '状態',
-  '投稿文（Google用）', '生成日時', '投稿日時', '備考'
+  '投稿文（Google用）', '生成日時', '投稿日時', '備考', '画像URL（任意）'
 ];
-const COL = { id: 'A', title: 'B', source: 'C', url: 'D', status: 'E', summary: 'F', generatedAt: 'G', postedAt: 'H', note: 'I' };
+const COL = { id: 'A', title: 'B', source: 'C', url: 'D', status: 'E', summary: 'F', generatedAt: 'G', postedAt: 'H', note: 'I', imageUrl: 'J' };
 
 const ST = { READY: '未着手', WAIT: '承認待ち', DONE: '投稿済', SKIP: 'スキップ', ERROR: 'エラー' };
 
@@ -80,6 +86,9 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
   const gbpConfigured = !!(env.GBP_CLIENT_ID && env.GBP_CLIENT_SECRET && env.GBP_REFRESH_TOKEN &&
                            env.GBP_ACCOUNT_ID && env.GBP_LOCATION_ID);
 
+  const BASE_URL = (env.PUBLIC_BASE_URL || env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+  const AUTO_IMAGE = env.GBP_AUTO_IMAGE !== 'off' && !!BASE_URL && imageEnabled();
+
   let sheetReady = false;
   const inFlight = new Set(); // 承認ボタンの連打・二重投稿防止
 
@@ -95,7 +104,7 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
       });
       await sheets.spreadsheets.values.update({
         spreadsheetId,
-        range: `'${GBP_SHEET}'!A1:I1`,
+        range: `'${GBP_SHEET}'!A1:J1`,
         valueInputOption: 'RAW',
         requestBody: { values: [HEADERS] }
       });
@@ -106,7 +115,7 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
 
   async function readRows() {
     await ensureSheet();
-    const r = await sheets.spreadsheets.values.get({ spreadsheetId, range: `'${GBP_SHEET}'!A2:I` });
+    const r = await sheets.spreadsheets.values.get({ spreadsheetId, range: `'${GBP_SHEET}'!A2:J` });
     return (r.data.values || []).map((v, i) => ({
       row: i + 2,
       id: (v[0] || '').trim(),
@@ -114,7 +123,8 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
       source: v[2] || '',
       url: (v[3] || '').trim(),
       status: (v[4] || '').trim(),
-      summary: v[5] || ''
+      summary: v[5] || '',
+      imageUrl: (v[9] || '').trim()
     }));
   }
 
@@ -169,13 +179,26 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
     return { text, problems };
   }
 
+  // ── 投稿に添える画像（シートのURL指定 → なければタイトル入りカードを自動作成） ──
+  function imageFor(row, summary) {
+    if (/^https:\/\//.test(row.imageUrl)) return { url: row.imageUrl, custom: true };
+    if (!AUTO_IMAGE) return null;
+    const title = row.title || String(summary || '').split('\n')[0];
+    return { url: buildImageUrl(BASE_URL, title, 1200), preview: buildImageUrl(BASE_URL, title, 480) };
+  }
+
   // ── LINE への投稿案送信 ──
   function approvalMessages(row, text, problems, extra) {
     const head = ['📝 Googleビジネスプロフィール投稿案', row.title ? `元記事：${row.title}` : ''].filter(Boolean).join('\n');
     const messages = [
       { type: 'text', text: `${head}\n\n━━━━━━━━\n${text}\n━━━━━━━━\n（${text.length}文字）` }
     ];
+    const image = imageFor(row, text);
+    if (image && !image.custom) {
+      messages.push({ type: 'image', originalContentUrl: image.url, previewImageUrl: image.preview });
+    }
     const notes = [];
+    if (image && image.custom) notes.push(`🖼 添付する画像（シートの指定）\n${image.url}`);
     if (problems.length) notes.push(`⚠️ 自動チェックで気になる点があります。内容をよく確認してください\n・${problems.join('\n・')}`);
     if (!gbpConfigured) notes.push('ℹ️ Google接続が未設定のため、承認しても実際には投稿されません（テスト動作）');
     if (extra) notes.push(extra);
@@ -234,7 +257,7 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
   }
 
   // ── Google Business Profile への投稿 ──
-  async function postToGoogle(text, url) {
+  async function postToGoogle(text, url, imageUrl) {
     const oauth2 = new google.auth.OAuth2(env.GBP_CLIENT_ID, env.GBP_CLIENT_SECRET);
     oauth2.setCredentials({ refresh_token: env.GBP_REFRESH_TOKEN });
     const { token } = await oauth2.getAccessToken();
@@ -247,12 +270,17 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
           languageCode: 'ja',
           summary: text,
           topicType: 'STANDARD',
-          callToAction: { actionType: 'LEARN_MORE', url }
+          callToAction: { actionType: 'LEARN_MORE', url },
+          ...(imageUrl ? { media: [{ mediaFormat: 'PHOTO', sourceUrl: imageUrl }] } : {})
         }),
         signal: AbortSignal.timeout(30000)
       }
     );
-    if (!res.ok) throw new Error(`GBP API ${res.status}: ${(await res.text()).slice(0, 400)}`);
+    if (!res.ok) {
+      const err = new Error(`GBP API ${res.status}: ${(await res.text()).slice(0, 400)}`);
+      err.status = res.status;
+      throw err;
+    }
     return res.json(); // { name, searchUrl, ... }
   }
 
@@ -301,10 +329,21 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
           return true;
         }
         const url = /^https:\/\//.test(row.url) ? row.url : DEFAULT_URL;
+        const image = imageFor(row, row.summary);
         try {
-          const post = await postToGoogle(row.summary, url);
+          let post;
+          let imageNote = '';
+          try {
+            post = await postToGoogle(row.summary, url, image && image.url);
+          } catch (err) {
+            // 画像が原因の入力エラー（400）なら、投稿は作られていないので、文章のみで1回だけ再試行する
+            if (!(image && err.status === 400)) throw err;
+            console.error('[GBP] 画像つき投稿が400。文章のみで再試行:', err.message);
+            post = await postToGoogle(row.summary, url);
+            imageNote = '\n⚠️ 画像を付けられなかったため、文章のみで投稿しました。';
+          }
           await updateRow(row.row, { status: ST.DONE, postedAt: jstNow(), note: post.searchUrl || post.name || '' });
-          await reply(`✅ Googleビジネスプロフィールに投稿しました。${post.searchUrl ? `\n${post.searchUrl}` : ''}`);
+          await reply(`✅ Googleビジネスプロフィールに投稿しました。${imageNote}${post.searchUrl ? `\n${post.searchUrl}` : ''}`);
         } catch (err) {
           console.error('[GBP] 投稿失敗:', err);
           await updateRow(row.row, { status: ST.ERROR, note: String(err.message).slice(0, 400) });
@@ -339,6 +378,22 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
     }
   });
 
+  // 投稿に添えるカード画像（署名つきURLだけ受け付ける）
+  app.get('/gbp-image.png', (req, res) => {
+    const title = String(req.query.t || '').slice(0, 200);
+    const width = Number(req.query.w);
+    if (!ALLOWED_WIDTHS.includes(width) || !verifyImage(title, width, String(req.query.sig || ''))) {
+      return res.status(403).send('forbidden');
+    }
+    try {
+      res.set({ 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' })
+        .send(renderCard(title, { width }));
+    } catch (err) {
+      console.error('[GBP] 画像の作成に失敗:', err);
+      res.status(500).send('error');
+    }
+  });
+
   // スタッフが手動で今すぐ案を作る（#gbp案）
   async function handleCommand(event, senderId, text) {
     if (text !== '#gbp案') return false;
@@ -353,7 +408,7 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
     return true;
   }
 
-  console.log(`GBP投稿機能：${gbpConfigured ? 'Google接続あり' : 'テスト動作（Google接続未設定）'}`);
+  console.log(`GBP投稿機能：${gbpConfigured ? 'Google接続あり' : 'テスト動作（Google接続未設定）'} / 画像：${AUTO_IMAGE ? '自動作成' : '自動作成なし（シート指定のみ）'}`);
   return { handlePostback, handleCommand, validateSummary };
 }
 
