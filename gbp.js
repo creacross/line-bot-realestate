@@ -1,8 +1,8 @@
 // ============================================================
-// Google ビジネスプロフィール 週2回投稿（LINE承認制）
+// Google ビジネスプロフィール 週3回投稿（LINE承認制）
 //
 // 流れ
-//   1. GitHub Actions が火・金の朝に POST /cron/gbp-draft を呼ぶ
+//   1. GitHub Actions が火・金・日の朝に POST /cron/gbp-draft を呼ぶ
 //   2. スプレッドシート「GBP投稿」タブの未使用記事を1件選び、
 //      Claude API で Google 用の短文に要約
 //   3. スタッフ（ADMIN_USER_IDS）へ LINE で投稿案＋承認ボタンを送信

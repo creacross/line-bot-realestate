@@ -1,8 +1,8 @@
-name: GBP投稿案の作成（火・金 朝9時）
+name: GBP投稿案の作成（火・金・日 朝9時）
 
 on:
   schedule:
-    - cron: '0 0 * * 2,5' # UTC 0:00 = 日本時間 9:00（火・金）
+    - cron: '0 0 * * 0,2,5' # UTC 0:00 = 日本時間 9:00（日・火・金）
   workflow_dispatch: {}   # 手動実行も可
 
 jobs:
