@@ -824,6 +824,59 @@ const gbp = createGbp({
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// スリープ対策（営業時間だけ、自分自身にアクセスして起きたままにする）
+//
+//  Render の無料プランは15分アクセスがないとスリープし、復帰に約1分かかる。
+//  一方 LINE の webhook は2秒で応答がないとタイムアウトするため、スリープ中に
+//  承認ボタンを押しても操作が届かず「無反応」になってしまう。
+//  そこで、営業時間の間だけ自分自身へ定期アクセスし、起きた状態を保つ。
+//
+//  ※ 起きている時間は Render の無料枠（月750時間・ワークスペース共有）を消費する。
+//     既定の 8〜20時なら月およそ360時間。時間帯は KEEPALIVE_HOURS で変えられる。
+//
+//  環境変数
+//    KEEPALIVE              : off にすると、この仕組みを止める
+//    KEEPALIVE_HOURS        : 起こしておく時間帯（日本時間。既定 8-20）
+//    KEEPALIVE_INTERVAL_MIN : アクセス間隔（分。既定 10）
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const KEEPALIVE_BASE = (process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+const KEEPALIVE_INTERVAL_MIN = Math.min(14, Math.max(1, Number(process.env.KEEPALIVE_INTERVAL_MIN) || 10));
+const [KEEPALIVE_START, KEEPALIVE_END] = (() => {
+  const m = /^(\d{1,2})\s*-\s*(\d{1,2})$/.exec((process.env.KEEPALIVE_HOURS || '8-20').trim());
+  const ok = m && Number(m[1]) <= 24 && Number(m[2]) <= 24 && Number(m[1]) !== Number(m[2]);
+  if (!ok && process.env.KEEPALIVE_HOURS) {
+    console.warn(`⚠️ KEEPALIVE_HOURS の指定「${process.env.KEEPALIVE_HOURS}」が読めないため、既定の 8-20 を使います`);
+  }
+  return ok ? [Number(m[1]), Number(m[2])] : [8, 20];
+})();
+
+// 日本時間の「時」（日本にサマータイムはないので、UTC+9 で計算できる）
+const jstHour = () => new Date(Date.now() + 9 * 3600 * 1000).getUTCHours();
+
+function withinKeepaliveWindow() {
+  const h = jstHour();
+  return KEEPALIVE_START <= KEEPALIVE_END
+    ? h >= KEEPALIVE_START && h < KEEPALIVE_END      // 例 8-20
+    : h >= KEEPALIVE_START || h < KEEPALIVE_END;     // 例 22-6（日をまたぐ場合）
+}
+
+function startKeepalive() {
+  if (process.env.KEEPALIVE === 'off' || !KEEPALIVE_BASE) {
+    console.log(`スリープ対策：なし${KEEPALIVE_BASE ? '（KEEPALIVE=off）' : '（URL不明のため）'}`);
+    return;
+  }
+  console.log(`スリープ対策：日本時間 ${KEEPALIVE_START}時〜${KEEPALIVE_END}時 の間、${KEEPALIVE_INTERVAL_MIN}分おきに自分へアクセスします`);
+  setInterval(async () => {
+    if (!withinKeepaliveWindow()) return;
+    try {
+      await fetch(`${KEEPALIVE_BASE}/`, { signal: AbortSignal.timeout(15000) });
+    } catch (err) {
+      console.warn('スリープ対策のアクセスに失敗:', err.message);
+    }
+  }, KEEPALIVE_INTERVAL_MIN * 60 * 1000);
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // サーバー起動（状態を読み込んでから受付開始）
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 loadStates().finally(() => {
@@ -838,5 +891,6 @@ loadStates().finally(() => {
     console.log('#bot再開 [お客さまID]  → Bot対応に戻す');
     console.log('#状態確認 [お客さまID] → 状態を確認');
     console.log('#myid                  → 自分のUser IDを表示');
+    startKeepalive();
   });
 });
