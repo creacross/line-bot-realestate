@@ -731,9 +731,12 @@ async function replyMessage(replyToken, messages) {
     if (!response.ok) {
       const errorBody = await response.text();
       console.error('LINE API Error:', response.status, errorBody);
+      return false;
     }
+    return true;
   } catch (err) {
     console.error('Reply failed:', err);
+    return false;
   }
 }
 
@@ -754,9 +757,12 @@ async function pushMessage(to, messages) {
     if (!response.ok) {
       const errorBody = await response.text();
       console.error(`LINE Push Error（${to}）:`, response.status, errorBody);
+      return false;
     }
+    return true;
   } catch (err) {
     console.error(`Push failed（${to}）:`, err);
+    return false;
   }
 }
 

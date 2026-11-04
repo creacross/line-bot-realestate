@@ -297,7 +297,13 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
     if (!params.gbp) return false;
 
     const senderId = event.source && event.source.userId;
-    const reply = text => replyMessage(event.replyToken, [{ type: 'text', text }]);
+    // Render の無料プランはスリープ復帰に時間がかかり、その間に返信トークンが失効することがある。
+    // 返信に失敗したら、プッシュで必ず結果を届ける。
+    const say = async messages => {
+      const ok = await replyMessage(event.replyToken, messages);
+      if (!ok && senderId) await pushMessage(senderId, messages);
+    };
+    const reply = text => say([{ type: 'text', text }]);
     if (!adminUserIds.includes(senderId)) {
       console.log(`[GBP] 管理者以外の操作を無視: ${senderId}`);
       return true;
@@ -318,7 +324,7 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
       } else if (action === 'redo') {
         const { text, problems } = await generateSummary(row);
         await updateRow(row.row, { summary: text, generatedAt: jstNow(), note: problems.join(' / ') });
-        await replyMessage(event.replyToken, approvalMessages(row, text, problems).slice(0, 5));
+        await say(approvalMessages(row, text, problems).slice(0, 5));
       } else if (action === 'approve') {
         if (validateSummary(row.summary).some(p => p.includes('文字を超'))) {
           await reply('⚠️ 文字数が上限を超えているため投稿できません。「作り直す」を押してください。');
@@ -398,7 +404,8 @@ function createGbp({ app, sheets, spreadsheetId, adminUserIds, pushMessage, repl
   async function handleCommand(event, senderId, text) {
     if (text !== '#gbp案') return false;
     if (!adminUserIds.includes(senderId)) return false;
-    await replyMessage(event.replyToken, [{ type: 'text', text: '📝 投稿案を作成します。少しお待ちください。' }]);
+    const ok = await replyMessage(event.replyToken, [{ type: 'text', text: '📝 投稿案を作成します。少しお待ちください。' }]);
+    if (!ok) await pushMessage(senderId, [{ type: 'text', text: '📝 投稿案を作成します。少しお待ちください。' }]);
     try {
       await createDraftAndNotify();
     } catch (err) {
