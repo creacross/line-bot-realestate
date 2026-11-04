@@ -1,0 +1,19 @@
+name: ボットを起こす（営業時間の見守り）
+
+# 営業時間の間、ボットが眠ってしまっていないか定期的に確認し、眠っていれば起こす。
+# ふだんはボット自身が自分にアクセスして起きているため、これは保険。
+on:
+  schedule:
+    # UTC → 日本時間 8・10・12・14・16・18時
+    - cron: '0 23,1,3,5,7,9 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ボットにアクセスして起こす
+        run: |
+          # スリープからの復帰に時間がかかるため、長めに待って再試行する
+          curl -fsS --max-time 180 --retry 3 --retry-delay 20 --retry-all-errors \
+            -o /dev/null "${{ secrets.BOT_URL }}/"
